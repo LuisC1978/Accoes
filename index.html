@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="pt-PT">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1419">
+<title>Carteira Acções</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+:root{
+  --bg:#0f1419;--card:#182029;--card2:#1f2933;--line:#2b3642;--txt:#e6edf3;--mut:#8b98a5;
+  --acc:#4ea1ff;--buy:#2fbf71;--sell:#ff5c5c;--hold:#f5b642;--wait:#8b98a5;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{padding-bottom:calc(64px + env(safe-area-inset-bottom))}
+header{position:sticky;top:0;z-index:5;background:var(--bg);padding:12px 16px 8px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+header h1{font-size:17px;margin:0;flex:1}
+#status{font-size:12px;color:var(--mut);text-align:right}
+main{padding:12px 16px;max-width:760px;margin:0 auto}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--card);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom);z-index:6}
+nav button{flex:1;background:none;border:0;color:var(--mut);padding:10px 4px;font:inherit;font-size:12px}
+nav button.on{color:var(--acc)}
+nav button span{display:block;font-size:19px}
+.tab{display:none}.tab.on{display:block}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:0 0 12px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.sp{flex:1}
+.mut{color:var(--mut);font-size:13px}
+.big{font-size:22px;font-weight:600}
+.pos{color:var(--buy)}.neg{color:var(--sell)}
+button.b{background:var(--acc);color:#fff;border:0;border-radius:9px;padding:10px 14px;font:inherit;font-weight:600}
+button.b2{background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:9px;padding:9px 12px;font:inherit}
+button.x{background:none;border:0;color:var(--mut);font-size:18px;padding:4px 8px}
+button:disabled{opacity:.5}
+input,textarea,select{width:100%;background:var(--card2);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:9px;font:inherit}
+textarea{min-height:90px}
+label{display:block;font-size:13px;color:var(--mut);margin:8px 0 4px}
+.grid3{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:8px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.badge{display:inline-block;border-radius:6px;padding:3px 8px;font-weight:700;font-size:13px;letter-spacing:.3px}
+.COMPRAR{background:rgba(47,191,113,.18);color:var(--buy)}
+.VENDER{background:rgba(255,92,92,.18);color:var(--sell)}
+.MANTER{background:rgba(245,182,66,.18);color:var(--hold)}
+.AGUARDAR,.EVITAR{background:rgba(139,152,165,.18);color:var(--wait)}
+.EVITAR{color:var(--sell)}
+.bar{height:6px;background:var(--card2);border-radius:3px;position:relative;margin:8px 0 2px;overflow:hidden}
+.bar i{position:absolute;top:0;bottom:0;left:50%}
+.tick{font-weight:700;font-size:17px}
+details summary{cursor:pointer;color:var(--acc);font-size:13px;margin-top:8px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td{padding:3px 0;border-bottom:1px solid var(--line)}td:last-child{text-align:right}
+ul.r{margin:6px 0;padding-left:18px;font-size:13px}
+canvas{width:100%;height:170px;display:block;margin-top:8px}
+.hl{font-size:13px;margin:4px 0}.hl a{color:var(--txt)}
+.pick{border-left:3px solid var(--buy)}
+.rank{font-size:13px;color:var(--mut)}
+.note{font-size:12px;color:var(--mut);margin-top:10px}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--card2);border-radius:8px;padding:10px;font-size:12px;max-height:340px;overflow:auto}
+.legend{font-size:11px;color:var(--mut)}
+.legend b{display:inline-block;width:10px;height:3px;vertical-align:middle;margin:0 3px 0 8px}
+</style>
+</head>
+<body>
+<header><h1>📈 Carteira Acções</h1><div id="status"></div></header>
+<main>
+  <!-- CARTEIRA -->
+  <section class="tab on" id="t-carteira">
+    <div class="card">
+      <div class="row"><div class="sp"><div class="mut">Valor da carteira</div><div class="big" id="pv">—</div></div>
+        <div style="text-align:right"><div class="mut">P/L total</div><div class="big" id="pl">—</div></div></div>
+      <div class="mut" id="cashInfo"></div>
+      <div class="row" style="margin-top:10px"><button class="b" id="btnAnalyse">Analisar carteira</button>
+        <button class="b2" id="btnAdd">+ Posição</button><span class="sp"></span><button class="b2" id="btnClaudeP">🤖 Claude</button></div>
+    </div>
+    <div class="card" id="addForm" hidden>
+      <div class="grid3">
+        <div><label>Ticker</label><input id="fSym" placeholder="NVDA ou GALP:XLIS" autocapitalize="characters"></div>
+        <div><label>Quantidade</label><input id="fQty" type="number" step="any" inputmode="decimal"></div>
+        <div><label>Preço médio</label><input id="fAvg" type="number" step="any" inputmode="decimal"></div>
+      </div>
+      <div class="row" style="margin-top:10px"><button class="b" id="fSave">Guardar</button><button class="b2" id="fCancel">Cancelar</button></div>
+      <div class="note">Ações PSI20: usa o sufixo <b>:XLIS</b> (ex. GALP:XLIS, EDP:XLIS, BCP:XLIS). EUA: só o ticker.</div>
+    </div>
+    <div id="posList"></div>
+  </section>
+
+  <!-- TOP 5 -->
+  <section class="tab" id="t-top">
+    <div class="card">
+      <label>Watchlist a analisar (separada por vírgulas)</label>
+      <textarea id="watch"></textarea>
+      <div class="row" style="margin-top:10px"><button class="b" id="btnScan">Calcular Top 5</button><span class="sp"></span><button class="b2" id="btnClaudeT">🤖 Sumários Claude</button></div>
+      <div class="note">Cada ticker gasta 1 crédito Twelve Data (grátis: 8/min, 800/dia). Os dados diários ficam em cache até ao dia seguinte.</div>
+    </div>
+    <div id="topList"></div>
+  </section>
+
+  <!-- CLAUDE -->
+  <section class="tab" id="t-claude">
+    <div class="card">
+      <div class="row"><b class="sp" id="cTitle">Pedido para o Claude</b></div>
+      <p class="mut">A app prepara um pedido com os indicadores, as notícias e a decisão das regras. Partilha-o com a app Claude (ou copia-o) para teres uma segunda opinião com contexto de notícias atuais.</p>
+      <div class="row"><button class="b" id="cShare">Partilhar</button><button class="b2" id="cCopy">Copiar</button><button class="b2" id="cOpen">Abrir claude.ai</button></div>
+      <pre id="cText">Analisa a carteira ou o Top 5 primeiro e depois carrega em 🤖 Claude.</pre>
+    </div>
+  </section>
+
+  <!-- DEFINIÇÕES -->
+  <section class="tab" id="t-def">
+    <div class="card">
+      <label>Chave API Twelve Data (obrigatória)</label><input id="sTd" placeholder="twelvedata.com → API keys">
+      <label>Chave API Finnhub (opcional, notícias de ações EUA)</label><input id="sFh" placeholder="finnhub.io → Dashboard">
+      <div class="grid2">
+        <div><label>Liquidez disponível (EUR)</label><input id="sCash" type="number" step="any" inputmode="decimal"></div>
+        <div><label>Risco por operação (% carteira)</label><input id="sRisk" type="number" step="0.1"></div>
+        <div><label>Peso máx. por ação (%)</label><input id="sMax" type="number" step="1"></div>
+        <div><label>Stop-loss máx. (% perda)</label><input id="sLoss" type="number" step="1"></div>
+        <div><label>Limiar de compra (pontuação)</label><input id="sBuy" type="number" step="1"></div>
+        <div><label>Limiar de venda (pontuação)</label><input id="sSell" type="number" step="1"></div>
+        <div><label>Realizar lucro a partir de (%)</label><input id="sTp" type="number" step="1"></div>
+      </div>
+      <div class="row" style="margin-top:12px"><button class="b" id="sSave">Guardar</button><button class="b2" id="sClear">Limpar cache</button>
+        <span class="sp"></span><button class="b2" id="sExport">Exportar dados</button><button class="b2" id="sImport">Importar</button></div>
+      <div class="note">
+        <b>Como decide:</b> soma pontos de tendência (EMA13/50/100/200 diárias), momentum (RSI14, MACD 12/26/9), Bollinger (20,2), volume e sentimento de notícias → pontuação −100…+100.
+        Compra se ≥ limiar (meia posição se convicção moderada); a quantidade é o mínimo entre: risco % da carteira com stop a 2×ATR14, peso máximo por ação e liquidez.
+        Vende 1/3 se ≤ limiar de venda, tudo se ≤ 1,7× o limiar ou se a perda passar o stop-loss com o preço abaixo da EMA200; realiza 25% se o ganho passar o limite com RSI&gt;75 acima da banda superior.
+        <br><br>Ferramenta de apoio à decisão, não é aconselhamento financeiro. Os dados gratuitos podem vir com atraso: confirma os preços no TradingView/broker.
+      </div>
+    </div>
+  </section>
+</main>
+<nav>
+  <button class="on" data-t="carteira"><span>💼</span>Carteira</button>
+  <button data-t="top"><span>🏆</span>Top 5</button>
+  <button data-t="claude"><span>🤖</span>Claude</button>
+  <button data-t="def"><span>⚙️</span>Definições</button>
+</nav>
+<script src="engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

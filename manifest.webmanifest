@@ -1,0 +1,16 @@
+{
+  "name": "Carteira Acções",
+  "short_name": "Acções",
+  "description": "Análise técnica e decisões comprar/manter/vender para a tua carteira de ações",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1419",
+  "theme_color": "#0f1419",
+  "lang": "pt-PT",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
