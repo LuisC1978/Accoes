@@ -210,7 +210,35 @@
    ctx: { portfolioValue, cash, fx }  (em moeda base; fx = moeda base por 1 unidade da moeda do ativo)
    s:   { buyThreshold, sellThreshold, riskPct, maxPosPct, maxLossPct, takeProfitPct }
   */
+  /* Plano de entrada: suporte dinâmico mais próximo abaixo do preço (EMA13, média das Bollinger, EMA50).
+     Se o preço está a ≤ 1 ATR desse suporte → entrada já, entre o suporte e o preço atual.
+     Se está mais longe (esticado) → aguardar recuo para a zona suporte … suporte + 0,5 ATR.
+     Stop a 2×ATR abaixo do topo da zona (a mesma distância usada no dimensionamento). */
+  function entryPlan(ind, target) {
+    const p = ind.close, a = ind.atr;
+    if (!a) return null;
+    const cands = [['EMA13', ind.ema13], ['média Bollinger', ind.bbMid], ['EMA50', ind.ema50]]
+      .filter(([, v]) => v != null && v < p).sort((x, y) => y[1] - x[1]);
+    let low, high, now, ref;
+    if (!cands.length) { // preço abaixo de todos os suportes: só entrar se recuperar a EMA13
+      ref = 'EMA13'; low = ind.ema13 != null ? Math.max(p, ind.ema13) : p; high = low + 0.5 * a; now = false;
+      return { low, high, now, ref, stop: high - 2 * a, rr: target ? (target - high) / (2 * a) : null, breakout: true };
+    }
+    const [name, sup] = cands[0];
+    ref = name;
+    if (p - sup <= a) { low = sup; high = p; now = true; }
+    else { low = sup; high = sup + 0.5 * a; now = false; }
+    const stop = high - 2 * a;
+    return { low, high, now, ref, stop, rr: target ? (target - high) / (high - stop) : null };
+  }
+
   function decide(ind, sc, pos, ctx, s) {
+    const d = decideCore(ind, sc, pos, ctx, s);
+    d.entry = entryPlan(ind, d.target);
+    return d;
+  }
+
+  function decideCore(ind, sc, pos, ctx, s) {
     const price = ind.close;
     const qty = pos ? (pos.qty || 0) : 0;
     const avg = pos ? (pos.avgPrice || 0) : 0;
@@ -218,7 +246,8 @@
     const reasons = [];
     const stop = ind.atr ? price - 2 * ind.atr : null;
     const plPct = qty > 0 && avg > 0 ? (price / avg - 1) * 100 : null;
-    let target = ind.hi52 > price * 1.03 ? ind.hi52 : (ind.atr ? price + 3 * ind.atr : null);
+    // Alvo técnico: máximo de 52 semanas, limitado a 5×ATR (evita alvos irrealistas em ações que caíram muito)
+    let target = ind.atr ? (ind.hi52 > price * 1.03 ? Math.min(ind.hi52, price + 5 * ind.atr) : price + 3 * ind.atr) : null;
     const upsidePct = target ? (target / price - 1) * 100 : null;
 
     // 1) Stop-loss: perda acima do limite E tendência longa quebrada
@@ -259,9 +288,11 @@
         reasons.push(`Tamanho limitado por: risco ${s.riskPct}% da carteira com stop a 2×ATR (${qRisk}), peso máx. ${s.maxPosPct}% (${qRoom}), liquidez (${qCash}).`);
         return { action: 'COMPRAR', qty: q, stop, target, upsidePct, plPct, reasons };
       }
-      const lim = qRoom < 1 ? `posição já no peso máximo de ${s.maxPosPct}%` : qCash < 1 ? 'sem liquidez suficiente' : 'o risco por operação não permite 1 unidade';
+      const lim = qRoom < 1 ? `posição já no peso máximo de ${s.maxPosPct}%`
+        : qCash < 1 ? (!(ctx.cash > 0) ? 'a liquidez está a 0 — define-a em Definições para a app calcular a quantidade' : 'a liquidez disponível não chega para 1 ação')
+        : 'o risco por operação não permite 1 unidade';
       reasons.push(`Sinal de compra (pontuação ${sc.score}) mas ${lim}.`);
-      return { action: qty > 0 ? 'MANTER' : 'AGUARDAR', qty: 0, stop, target, upsidePct, plPct, reasons, blockedBuy: true };
+      return { action: qty > 0 ? 'MANTER' : 'SINAL COMPRA', qty: 0, stop, target, upsidePct, plPct, reasons, blockedBuy: true };
     }
     if (qty > 0) {
       reasons.push(`Pontuação ${sc.score} entre ${s.sellThreshold} e ${s.buyThreshold}: sem sinal claro. Manter; stop técnico sugerido ${stop ? stop.toFixed(2) : '—'}.`);
@@ -271,7 +302,7 @@
     return { action: sc.score <= s.sellThreshold ? 'EVITAR' : 'AGUARDAR', qty: 0, stop, target, upsidePct, plPct, reasons };
   }
 
-  const api = { ema, sma, bollinger, rsi, macd, atr, computeIndicators, newsSentiment, scoreIndicators, decide };
+  const api = { ema, sma, bollinger, rsi, macd, atr, computeIndicators, newsSentiment, scoreIndicators, decide, entryPlan };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Engine = api;
 })(typeof self !== 'undefined' ? self : this);
