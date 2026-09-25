@@ -93,39 +93,54 @@
     return out;
   }
 
-  function computeIndicators(bars) {
+  // Séries completas de todos os indicadores (usadas no dia atual e no backtest)
+  function seriesAll(bars) {
     const c = bars.map(b => b.close);
-    const L = c.length - 1;
-    const e13 = ema(c, 13), e50 = ema(c, 50), e100 = ema(c, 100), e200 = ema(c, 200);
     const bb = bollinger(c, 20, 2);
-    const r = rsi(c, 14);
     const m = macd(c);
-    const a = atr(bars, 14);
-    const volAvg = sma(bars.map(b => b.volume || 0), 20);
-    const last252 = bars.slice(-252);
-    const hi52 = Math.max(...last252.map(b => b.high));
-    const lo52 = Math.min(...last252.map(b => b.low));
-    const pctB = bb.upper[L] != null ? (c[L] - bb.lower[L]) / (bb.upper[L] - bb.lower[L]) : null;
-    const bw = bb.upper[L] != null ? (bb.upper[L] - bb.lower[L]) / bb.mid[L] : null;
-    // largura mínima de banda nos últimos 120 dias -> squeeze
-    let minBw = Infinity;
-    for (let i = Math.max(19, L - 120); i <= L; i++) {
-      if (bb.upper[i] != null) minBw = Math.min(minBw, (bb.upper[i] - bb.lower[i]) / bb.mid[i]);
+    const N = c.length;
+    const bw = c.map((_, i) => bb.upper[i] != null ? (bb.upper[i] - bb.lower[i]) / bb.mid[i] : null);
+    const hi = new Array(N), lo = new Array(N);
+    for (let i = 0; i < N; i++) {
+      let h = -Infinity, l = Infinity;
+      for (let j = Math.max(0, i - 251); j <= i; j++) { if (bars[j].high > h) h = bars[j].high; if (bars[j].low < l) l = bars[j].low; }
+      hi[i] = h; lo[i] = l;
     }
     return {
-      date: bars[L].datetime, close: c[L], prevClose: c[L - 1],
-      changePct: (c[L] / c[L - 1] - 1) * 100,
-      ema13: e13[L], ema50: e50[L], ema100: e100[L], ema200: e200[L],
-      ema13Prev: e13[L - 1], ema50Prev: e50[L - 1], ema200Prev: e200[L - 1],
-      ema50_5ago: e50[L - 5],
-      bbUpper: bb.upper[L], bbMid: bb.mid[L], bbLower: bb.lower[L], pctB, bandwidth: bw,
-      squeeze: bw != null && bw <= minBw * 1.1,
-      rsi: r[L], rsiPrev: r[L - 1],
-      macd: m.line[L], macdSignal: m.signal[L], macdHist: m.hist[L], macdHistPrev: m.hist[L - 1],
-      atr: a[L], volume: bars[L].volume || 0, volAvg20: volAvg[L],
-      hi52, lo52, bars: bars.length,
-      series: { close: c, e13, e50, e100, e200, bbU: bb.upper, bbL: bb.lower, dates: bars.map(b => b.datetime) }
+      bars, c, N, dates: bars.map(b => b.datetime), vol: bars.map(b => b.volume || 0),
+      e13: ema(c, 13), e50: ema(c, 50), e100: ema(c, 100), e200: ema(c, 200),
+      bbU: bb.upper, bbM: bb.mid, bbL: bb.lower, bw,
+      rsi: rsi(c, 14), macd: m.line, macdSig: m.signal, macdHist: m.hist,
+      atr: atr(bars, 14), volAvg: sma(bars.map(b => b.volume || 0), 20), hi, lo
     };
+  }
+
+  // Indicadores no índice i (só usa dados até i: sem olhar para o futuro)
+  function indAt(S, i) {
+    const c = S.c;
+    let minBw = Infinity;
+    for (let j = Math.max(19, i - 120); j <= i; j++) if (S.bw[j] != null && S.bw[j] < minBw) minBw = S.bw[j];
+    const pctB = S.bbU[i] != null ? (c[i] - S.bbL[i]) / (S.bbU[i] - S.bbL[i]) : null;
+    return {
+      date: S.dates[i], close: c[i], prevClose: c[i - 1],
+      changePct: (c[i] / c[i - 1] - 1) * 100,
+      ema13: S.e13[i], ema50: S.e50[i], ema100: S.e100[i], ema200: S.e200[i],
+      ema13Prev: S.e13[i - 1], ema50Prev: S.e50[i - 1], ema200Prev: S.e200[i - 1],
+      ema50_5ago: i >= 5 ? S.e50[i - 5] : null,
+      bbUpper: S.bbU[i], bbMid: S.bbM[i], bbLower: S.bbL[i], pctB, bandwidth: S.bw[i],
+      squeeze: S.bw[i] != null && S.bw[i] <= minBw * 1.1,
+      rsi: S.rsi[i], rsiPrev: S.rsi[i - 1],
+      macd: S.macd[i], macdSignal: S.macdSig[i], macdHist: S.macdHist[i], macdHistPrev: S.macdHist[i - 1],
+      atr: S.atr[i], volume: S.vol[i], volAvg20: S.volAvg[i],
+      hi52: S.hi[i], lo52: S.lo[i], bars: i + 1
+    };
+  }
+
+  function computeIndicators(bars) {
+    const S = seriesAll(bars);
+    const L = S.N - 1;
+    return { ...indAt(S, L), S,
+      series: { close: S.c, e13: S.e13, e50: S.e50, e100: S.e100, e200: S.e200, bbU: S.bbU, bbL: S.bbL, dates: S.dates } };
   }
 
   // ---------- Sentimento de notícias (léxico simples EN/PT) ----------
@@ -302,7 +317,7 @@
     return { action: sc.score <= s.sellThreshold ? 'EVITAR' : 'AGUARDAR', qty: 0, stop, target, upsidePct, plPct, reasons };
   }
 
-  const api = { ema, sma, bollinger, rsi, macd, atr, computeIndicators, newsSentiment, scoreIndicators, decide, entryPlan };
+  const api = { ema, sma, bollinger, rsi, macd, atr, computeIndicators, seriesAll, indAt, newsSentiment, scoreIndicators, decide, entryPlan };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Engine = api;
 })(typeof self !== 'undefined' ? self : this);

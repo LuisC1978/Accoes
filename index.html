@@ -61,6 +61,13 @@ canvas{width:100%;height:170px;display:block;margin-top:8px}
 .rank{font-size:13px;color:var(--mut)}
 .note{font-size:12px;color:var(--mut);margin-top:10px}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--card2);border-radius:8px;padding:10px;font-size:12px;max-height:340px;overflow:auto}
+.verdict{font-size:18px;font-weight:700}
+.v-moderado{color:var(--buy)}.v-fraco{color:var(--hold)}.v-nulo{color:var(--sell)}
+.wbar{display:inline-block;height:8px;border-radius:2px;vertical-align:middle}
+th{text-align:left;font-weight:600;color:var(--mut);font-size:12px;padding:3px 0;border-bottom:1px solid var(--line)}
+th:not(:first-child),td.n{text-align:right}
+
+.tw{overflow-x:auto;margin:0 -4px}.tw table{min-width:520px}
 .legend{font-size:11px;color:var(--mut)}
 .legend b{display:inline-block;width:10px;height:3px;vertical-align:middle;margin:0 3px 0 8px}
 </style>
@@ -98,6 +105,17 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--card2);border-ra
       <div class="note">Cada ticker gasta 1 crédito Twelve Data (grátis: 8/min, 800/dia). Os dados diários ficam em cache até ao dia seguinte.</div>
     </div>
     <div id="topList"></div>
+  </section>
+
+  <!-- MODELO -->
+  <section class="tab" id="t-modelo">
+    <div class="card">
+      <b>Modelo histórico (3 anos)</b>
+      <p class="mut">Descarrega ~4 anos por ação da carteira + watchlist (1 crédito cada), testa as regras, treina um modelo nos primeiros ~2 anos e valida-o no último ano, que o modelo nunca viu. Os resultados abaixo são <b>fora da amostra</b>.</p>
+      <div class="row"><button class="b" id="mTrain">Treinar / atualizar modelo</button><span class="sp"></span><button class="b2" id="mClaude">🤖 Claude</button></div>
+      <div class="mut" id="mProg" style="margin-top:8px"></div>
+    </div>
+    <div id="mReport"></div>
   </section>
 
   <!-- CLAUDE -->
@@ -138,10 +156,12 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--card2);border-ra
 <nav>
   <button class="on" data-t="carteira"><span>💼</span>Carteira</button>
   <button data-t="top"><span>🏆</span>Top 5</button>
+  <button data-t="modelo"><span>🧪</span>Modelo</button>
   <button data-t="claude"><span>🤖</span>Claude</button>
   <button data-t="def"><span>⚙️</span>Definições</button>
 </nav>
 <script src="engine.js"></script>
+<script src="model.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
