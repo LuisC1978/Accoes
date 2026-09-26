@@ -265,29 +265,78 @@
     let target = ind.atr ? (ind.hi52 > price * 1.03 ? Math.min(ind.hi52, price + 5 * ind.atr) : price + 3 * ind.atr) : null;
     const upsidePct = target ? (target / price - 1) * 100 : null;
 
-    // 1) Stop-loss: perda acima do limite E tendência longa quebrada
-    if (qty > 0 && plPct != null && plPct <= -s.maxLossPct && ind.ema200 != null && price < ind.ema200) {
-      reasons.push(`Perda de ${plPct.toFixed(1)}% (limite ${s.maxLossPct}%) e preço abaixo da EMA200: tese técnica quebrada.`);
-      return { action: 'VENDER', qty: qty, stop, target, upsidePct, plPct, reasons };
+    // Stop da posição: manual (se definido) ou fixo (−maxLoss% do preço médio); sobe com o móvel (−trail% do fecho máximo desde a entrada)
+    let posStop = null;
+    if (qty > 0 && avg > 0) {
+      const manual = +pos.manualStop > 0 ? +pos.manualStop : null;
+      const fixed = manual ?? avg * (1 - s.maxLossPct / 100);
+      let maxSince = null, trail = null;
+      const tp = s.trailPct != null ? +s.trailPct : s.maxLossPct;
+      if (pos.since && tp > 0 && ind.S) {
+        for (let i = 0; i < ind.S.N; i++) if (ind.S.dates[i] >= pos.since) maxSince = Math.max(maxSince ?? -Infinity, ind.S.c[i]);
+        if (maxSince != null) trail = maxSince * (1 - tp / 100);
+      }
+      const level = trail != null && trail > fixed ? trail : fixed;
+      const kind = level === fixed ? (manual ? 'manual' : 'fixo') : 'móvel';
+      // fecho no dia em que a posição passou a ser acompanhada pela app (ou o último, se for hoje)
+      let closeAtTrack = null;
+      if (pos.trackedFrom && ind.S) {
+        const k = ind.S.dates.findIndex(d => d >= pos.trackedFrom);
+        closeAtTrack = ind.S.c[k >= 0 ? k : ind.S.N - 1];
+      }
+      posStop = { level, kind, fixed, trail, maxSince, distPct: (price / level - 1) * 100,
+        // já estava abaixo do stop quando entrou na app → o stop não pôde atuar; decisão é de tese, não automática
+        inheritedBreach: kind !== 'manual' && closeAtTrack != null && closeAtTrack <= level };
     }
+    const out = extra => ({ stop, target, upsidePct, plPct, reasons, posStop, ...extra });
+
+    // 1) Stop da posição (regra dura: não depende de outros indicadores)
+    if (posStop && price <= posStop.level) {
+      if (posStop.inheritedBreach) {
+        reasons.push(`A posição já estava abaixo do stop ${posStop.kind} (${posStop.level.toFixed(2)}) quando passou a ser acompanhada pela app (P/L ${plPct.toFixed(1)}%): a perda já aconteceu e o stop não pôde atuar.`);
+        reasons.push('Rever a tese (notícias, resultados, consenso) e decidir: vender, ou manter com um stop manual (✎ na posição) num suporte abaixo do preço atual.');
+        return out({ action: 'REVER TESE', qty: 0, review: true });
+      }
+      reasons.push(posStop.kind === 'fixo'
+        ? `Perda de ${plPct.toFixed(1)}% atingiu o stop de ${s.maxLossPct}% (${posStop.level.toFixed(2)}): sair e reavaliar a tese.`
+        : posStop.kind === 'manual'
+          ? `Preço ${price.toFixed(2)} tocou o stop manual ${posStop.level.toFixed(2)}: sair, como definido.`
+          : `Preço ${price.toFixed(2)} abaixo do stop móvel ${posStop.level.toFixed(2)} (máximo desde a entrada ${posStop.maxSince.toFixed(2)}): proteger o ganho.`);
+      return out({ action: 'VENDER', qty });
+    }
+    // 1b) Peso acima do máximo: vender o excesso (5% de tolerância para não andar a rodar a posição)
+    if (qty > 0 && ctx.portfolioValue > 0) {
+      const w = qty * price * fx / ctx.portfolioValue * 100;
+      if (w > s.maxPosPct * 1.05) {
+        const q = Math.ceil(qty - (s.maxPosPct / 100 * ctx.portfolioValue) / (price * fx));
+        if (q >= 1) { reasons.push(`Peso ${w.toFixed(1)}% acima do máximo de ${s.maxPosPct}%: vender o excesso.`); return out({ action: 'VENDER', qty: Math.min(q, qty) }); }
+      }
+    }
+    const nearStop = posStop && posStop.distPct < 3 ? `ALERTA: a ${posStop.distPct.toFixed(1)}% do stop ${posStop.kind} (${posStop.level.toFixed(2)}).` : null;
     // 2) Sinal forte de venda
     if (qty > 0 && sc.score <= s.sellThreshold * 1.7) {
       reasons.push(`Pontuação ${sc.score} muito negativa: sair da posição.`);
-      return { action: 'VENDER', qty: qty, stop, target, upsidePct, plPct, reasons };
+      return out({ action: 'VENDER', qty });
     }
     if (qty > 0 && sc.score <= s.sellThreshold) {
       const q = Math.max(1, Math.ceil(qty / 3));
       reasons.push(`Pontuação ${sc.score} ≤ ${s.sellThreshold}: reduzir 1/3 da posição e reavaliar.`);
-      return { action: 'VENDER', qty: q, stop, target, upsidePct, plPct, reasons };
+      if (nearStop) reasons.push(nearStop);
+      return out({ action: 'VENDER', qty: q });
     }
     // 3) Realização parcial de lucros quando esticado
     if (qty > 0 && plPct != null && plPct >= s.takeProfitPct && ind.rsi > 75 && ind.pctB > 1) {
       const q = Math.max(1, Math.floor(qty * 0.25));
       reasons.push(`Ganho de ${plPct.toFixed(1)}%, RSI ${ind.rsi.toFixed(0)} e acima da banda superior: realizar 25%.`);
-      return { action: 'VENDER', qty: q, stop, target, upsidePct, plPct, reasons, partial: true };
+      return out({ action: 'VENDER', qty: q, partial: true });
     }
     // 4) Compra
     if (sc.score >= s.buyThreshold) {
+      if (ctx.regime && ctx.regime.riskOff) {
+        reasons.push(`Sinal de compra (pontuação ${sc.score}), mas o mercado está em risk-off (QQQ abaixo da EMA200): compras novas suspensas.`);
+        if (nearStop) reasons.push(nearStop);
+        return out({ action: qty > 0 ? 'MANTER' : 'SINAL COMPRA', qty: 0, blockedBuy: true });
+      }
       const pv = ctx.portfolioValue;
       const priceBase = price * fx;
       const stopDistBase = ind.atr ? 2 * ind.atr * fx : priceBase * 0.08;
@@ -301,20 +350,22 @@
       if (q >= 1) {
         reasons.push(`Pontuação ${sc.score} ≥ ${s.buyThreshold}${conviction < 1 ? ' (convicção moderada: meia posição)' : ' (convicção alta)'}.`);
         reasons.push(`Tamanho limitado por: risco ${s.riskPct}% da carteira com stop a 2×ATR (${qRisk}), peso máx. ${s.maxPosPct}% (${qRoom}), liquidez (${qCash}).`);
-        return { action: 'COMPRAR', qty: q, stop, target, upsidePct, plPct, reasons };
+        return out({ action: 'COMPRAR', qty: q });
       }
       const lim = qRoom < 1 ? `posição já no peso máximo de ${s.maxPosPct}%`
         : qCash < 1 ? (!(ctx.cash > 0) ? 'a liquidez está a 0 — define-a em Definições para a app calcular a quantidade' : 'a liquidez disponível não chega para 1 ação')
         : 'o risco por operação não permite 1 unidade';
       reasons.push(`Sinal de compra (pontuação ${sc.score}) mas ${lim}.`);
-      return { action: qty > 0 ? 'MANTER' : 'SINAL COMPRA', qty: 0, stop, target, upsidePct, plPct, reasons, blockedBuy: true };
+      if (nearStop) reasons.push(nearStop);
+      return out({ action: qty > 0 ? 'MANTER' : 'SINAL COMPRA', qty: 0, blockedBuy: true });
     }
     if (qty > 0) {
-      reasons.push(`Pontuação ${sc.score} entre ${s.sellThreshold} e ${s.buyThreshold}: sem sinal claro. Manter; stop técnico sugerido ${stop ? stop.toFixed(2) : '—'}.`);
-      return { action: 'MANTER', qty: 0, stop, target, upsidePct, plPct, reasons };
+      reasons.push(`Pontuação ${sc.score} entre ${s.sellThreshold} e ${s.buyThreshold}: sem sinal claro. Manter; ${posStop ? `stop da posição ${posStop.level.toFixed(2)} (${posStop.kind}), ` : ''}stop técnico ${stop ? stop.toFixed(2) : '—'}.`);
+      if (nearStop) reasons.push(nearStop);
+      return out({ action: 'MANTER', qty: 0 });
     }
     reasons.push(`Pontuação ${sc.score}: sem sinal de entrada.`);
-    return { action: sc.score <= s.sellThreshold ? 'EVITAR' : 'AGUARDAR', qty: 0, stop, target, upsidePct, plPct, reasons };
+    return out({ action: sc.score <= s.sellThreshold ? 'EVITAR' : 'AGUARDAR', qty: 0 });
   }
 
   const api = { ema, sma, bollinger, rsi, macd, atr, computeIndicators, seriesAll, indAt, newsSentiment, scoreIndicators, decide, entryPlan };
