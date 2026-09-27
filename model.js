@@ -331,7 +331,8 @@
   }
   function bucketStats(model, score) { const k = bucketOf(score); return k >= 0 && model ? model.buckets[k] : null; }
 
-  const api = { train, forecastAll, bucketStats, feat, regimeNow, FEATURES, H, VERSION, _internal: { ridgeFit, spearman, simulate, tNW, crossZ } };
+  const BUILD = '5.1';
+  const api = { BUILD, train, forecastAll, bucketStats, feat, regimeNow, FEATURES, H, VERSION, _internal: { ridgeFit, spearman, simulate, tNW, crossZ } };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Model = api;
 })(typeof self !== 'undefined' ? self : this);

@@ -2,10 +2,25 @@
 const $ = s => document.querySelector(s);
 const E = window.Engine;
 const BASE = 'EUR';
+// ---------- Versão: todos os ficheiros têm de ser da mesma versão ----------
+const APP_BUILD = '5.1', APP_DATE = '2026-09-27';
+(function showVersion() {
+  const parts = { 'index.html': document.documentElement.dataset.build, 'app.js': APP_BUILD, 'engine.js': window.Engine && window.Engine.BUILD, 'model.js': window.Model && window.Model.BUILD, 'adaptive.js': window.Adaptive && window.Adaptive.BUILD };
+  const bad = Object.entries(parts).filter(([, v]) => v !== APP_BUILD);
+  const el = document.getElementById('ver'), info = document.getElementById('verInfo');
+  el.textContent = 'v' + APP_BUILD;
+  if (bad.length) {
+    el.classList.add('bad'); el.textContent = 'v' + APP_BUILD + ' ⚠';
+    el.title = 'Ficheiros de versões diferentes: ' + bad.map(([f, v]) => `${f} ${v || 'antigo'}`).join(', ');
+  }
+  info.innerHTML = `v${APP_BUILD} (${APP_DATE})` + (bad.length
+    ? ` — <b class="neg">ficheiros de versões diferentes: ${bad.map(([f, v]) => `${f} ${v || 'antigo'}`).join(', ')}. Volta a carregar todos os ficheiros no GitHub.</b>`
+    : ' — todos os ficheiros certos.');
+})();
 
 // ---------- Estado ----------
 const DEF = {
-  settings: { tdKey: '', fhKey: '', cash: 0, riskPct: 1, maxPosPct: 20, maxLossPct: 15, trailPct: 15, buyThreshold: 35, sellThreshold: -35, takeProfitPct: 25, modelExtra: '' },
+  settings: { tdKey: '', fhKey: '', cash: 0, riskPct: 1, maxPosPct: 20, maxLossPct: 15, trailPct: 15, buyThreshold: 35, sellThreshold: -35, takeProfitPct: 25, modelExtra: '', adaptMode: 'auto' },
   portfolio: [],
   watchlist: 'NBIS, PWR, P, CRWV, A, NVDA, AVGO, MRVL, WDC, VRT, NOW, CEG, OKLO, IONQ, RGTI, APLD, META, GALP:XLIS, EDP:XLIS, JMT:XLIS'
 };
@@ -43,7 +58,9 @@ function parseSym(raw) {
   const [symbol, mic] = raw.trim().toUpperCase().split(':');
   return { symbol, mic };
 }
-// Cache de séries em IndexedDB (~1000 barras por ação não cabem em localStorage)
+// ---------- Histórico guardado no dispositivo (IndexedDB) ----------
+// Cada ação guarda até ~6 anos de barras diárias. Só se descarregam as sessões em falta; depois do fecho,
+// os dados do dia ficam finais e não se volta a pedir nada até à sessão seguinte.
 const IDB = (() => {
   const mem = new Map(); let dbp = null;
   const open = () => dbp || (dbp = new Promise(res => {
@@ -54,12 +71,28 @@ const IDB = (() => {
   return {
     get: async k => mem.has(k) ? mem.get(k) : (await tx('readonly', s => s.get(k))) ?? null,
     set: async (k, v) => { mem.set(k, v); await tx('readwrite', s => s.put(v, k)); },
+    del: async k => { mem.delete(k); await tx('readwrite', s => s.delete(k)); },
+    keys: async () => (await tx('readonly', s => s.getAllKeys())) || [],
     clear: async () => { mem.clear(); await tx('readwrite', s => s.clear()); }
   };
 })();
-async function tdSeries(raw, size = 1000) {
-  const key = 'c_' + raw + '_' + size;
-  try { const c = await IDB.get(key); if (c && c.day === today()) return c; } catch (e) {}
+const MKT = { US: { tz: 'America/New_York', open: 570, close: 960 }, XLIS: { tz: 'Europe/Lisbon', open: 480, close: 990 } };
+const FINAL_AFTER = 30;              // minutos depois do fecho a partir dos quais a barra do dia é final
+const INTRADAY_TTL = 15 * 60e3;      // com o mercado aberto, volta a pedir no máximo a cada 15 min
+const FULL = 1000, KEEP = 1600;      // download inicial (~4 anos) e máximo guardado
+const mktOf = raw => (parseSym(raw).mic === 'XLIS' ? MKT.XLIS : MKT.US);
+function clockIn(tz, d = new Date()) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(d).map(x => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, min: (+p.hour % 24) * 60 + +p.minute };
+}
+const isWeekday = ds => { const g = new Date(ds + 'T12:00:00Z').getUTCDay(); return g > 0 && g < 6; };
+function prevWeekday(ds) { const d = new Date(ds + 'T12:00:00Z'); do d.setUTCDate(d.getUTCDate() - 1); while (d.getUTCDay() % 6 === 0); return d.toISOString().slice(0, 10); }
+// última sessão com fecho definitivo (feriados não são conhecidos: nesse caso a app pede uma vez e percebe que não há barra nova)
+function lastCompleteSession(m, now = new Date()) { const c = clockIn(m.tz, now); return isWeekday(c.date) && c.min >= m.close + FINAL_AFTER ? c.date : prevWeekday(c.date); }
+function marketOpenNow(m, now = new Date()) { const c = clockIn(m.tz, now); return isWeekday(c.date) && c.min >= m.open && c.min < m.close + FINAL_AFTER; }
+function fetchedAfterClose(m, iso, session) { if (!iso) return false; const f = clockIn(m.tz, new Date(iso)); return f.date > session || (f.date === session && f.min >= m.close + FINAL_AFTER); }
+function weekdaysAfter(a, b) { let n = 0; const d = new Date(a + 'T12:00:00Z'), e = new Date(b + 'T12:00:00Z'); while (d < e) { d.setUTCDate(d.getUTCDate() + 1); if (d.getUTCDay() % 6) n++; } return n; }
+async function tdFetch(raw, size) {
   if (!S.settings.tdKey) throw new Error('Falta a chave Twelve Data (Definições).');
   const { symbol, mic } = parseSym(raw);
   const u = new URL('https://api.twelvedata.com/time_series');
@@ -67,8 +100,63 @@ async function tdSeries(raw, size = 1000) {
   await throttle();
   const r = await fetch(u); const j = await r.json();
   if (j.status !== 'ok') throw new Error(j.message || 'Erro Twelve Data');
-  const bars = j.values.map(v => ({ datetime: v.datetime, open: +v.open, high: +v.high, low: +v.low, close: +v.close, volume: +(v.volume || 0) })).reverse();
-  const out = { day: today(), bars, meta: j.meta };
+  NET.calls++;
+  return { bars: j.values.map(v => ({ datetime: v.datetime.slice(0, 10), open: +v.open, high: +v.high, low: +v.low, close: +v.close, volume: +(v.volume || 0) })).reverse(), meta: j.meta };
+}
+const NET = { calls: 0 };
+// junta as barras novas às guardadas; devolve null se houve split/ajuste ou falha de continuidade (→ descarregar tudo)
+function mergeBars(old, inc) {
+  if (!inc.length) return old;
+  if (!old.length) return inc;
+  const idx = new Map(old.map((b, i) => [b.datetime, i])), cut = old.length >= 2 ? old[old.length - 2].datetime : '';
+  let overlap = 0;
+  for (const b of inc) {
+    const i = idx.get(b.datetime); if (i == null) continue;
+    overlap++;
+    if (b.datetime < cut && Math.abs(b.close / old[i].close - 1) > 0.005) return null;
+  }
+  if (!overlap && inc[0].datetime > old[old.length - 1].datetime) return null;
+  const first = inc[0].datetime;
+  return [...old.filter(b => b.datetime < first), ...inc];
+}
+function seriesView(c, size, session) {
+  const all = c.bars, partial = all.length > 0 && all[all.length - 1].datetime > session;
+  const bars = all.slice(-size);
+  return { bars, meta: c.meta, partial, complete: partial ? all.slice(0, -1) : all, fetchedAt: c.fetchedAt, session };
+}
+// opts.offline: só o que está guardado (sem pedidos)
+async function tdSeries(raw, size = FULL, opts = {}) {
+  if (raw.includes('/')) return fxSeries(raw);
+  const m = mktOf(raw), key = 'h_' + raw, now = new Date(), session = lastCompleteSession(m, now);
+  let c = null; try { c = await IDB.get(key); } catch (e) {}
+  if (c && c.bars && c.bars.length) {
+    // sessão a decorrer: atualiza no máximo a cada 15 min; fora dela, os dados guardados são finais até à sessão seguinte
+    const final = !marketOpenNow(m, now) && fetchedAfterClose(m, c.fetchedAt, session);
+    const fresh = now - new Date(c.fetchedAt) < INTRADAY_TTL;
+    if (opts.offline || final || fresh) return seriesView(c, size, session);
+  } else if (opts.offline) throw new Error('Sem histórico guardado');
+  let out;
+  try {
+    const last = c && c.bars.length ? c.bars[c.bars.length - 1].datetime : null;
+    const gap = last ? weekdaysAfter(last, clockIn(m.tz, now).date) : Infinity;
+    let merged = null, meta = null;
+    if (last && gap < 400) {
+      const inc = await tdFetch(raw, gap + 5);
+      merged = mergeBars(c.bars, inc.bars); meta = inc.meta;
+    }
+    if (!merged) { const full = await tdFetch(raw, Math.max(size, FULL)); merged = full.bars; meta = full.meta; }
+    out = { bars: merged.slice(-KEEP), meta, fetchedAt: now.toISOString() };
+  } catch (e) {
+    if (c && c.bars && c.bars.length && !/chave/i.test(e.message)) return { ...seriesView(c, size, session), stale: e.message };
+    throw e;
+  }
+  await IDB.set(key, out);
+  return seriesView(out, size, session);
+}
+async function fxSeries(raw) {
+  const key = 'fx_' + raw;
+  try { const c = await IDB.get(key); if (c && c.day === today()) return c; } catch (e) {}
+  const d = await tdFetch(raw, 2), out = { day: today(), bars: d.bars, meta: d.meta };
   await IDB.set(key, out);
   return out;
 }
@@ -92,12 +180,34 @@ async function news(raw) {
     return items;
   } catch (e) { return []; }
 }
-function clearCache() {
+async function clearCache() {
   Object.keys(localStorage).filter(k => k.startsWith('acc_c_') || k.startsWith('acc_n_')).forEach(k => localStorage.removeItem(k));
-  IDB.clear();
+  await IDB.clear(); PREP = { key: '', P: null };
 }
-// limpa a cache antiga (versão 1) de localStorage, que ocupava espaço
+async function cacheInfo() {
+  const ks = (await IDB.keys()).filter(k => String(k).startsWith('h_'));
+  let bars = 0, oldest = null, newest = null, lastFetch = null;
+  for (const k of ks) {
+    const c = await IDB.get(k); if (!c || !c.bars || !c.bars.length) continue;
+    bars += c.bars.length;
+    const a = c.bars[0].datetime, b = c.bars[c.bars.length - 1].datetime;
+    if (!oldest || a < oldest) oldest = a; if (!newest || b > newest) newest = b;
+    if (!lastFetch || c.fetchedAt > lastFetch) lastFetch = c.fetchedAt;
+  }
+  return { n: ks.length, bars, oldest, newest, lastFetch };
+}
+// limpeza única das caches antigas (v5.0 e anteriores guardavam cópias completas por dia)
 Object.keys(localStorage).filter(k => k.startsWith('acc_c_')).forEach(k => localStorage.removeItem(k));
+const MIGRATED = (async () => {
+  try {
+    for (const k of (await IDB.keys()).filter(k => /^c_/.test(String(k)))) {
+      const m = /^c_(.+)_(\d+)$/.exec(k), c = await IDB.get(k);
+      if (m && !m[1].includes('/') && +m[2] >= 500 && c && c.bars && !(await IDB.get('h_' + m[1])))
+        await IDB.set('h_' + m[1], { bars: c.bars.map(b => ({ ...b, datetime: String(b.datetime).slice(0, 10) })), meta: c.meta, fetchedAt: c.day + 'T00:00:00Z' });
+      await IDB.del(k);
+    }
+  } catch (e) {}
+})();
 
 // ---------- Modelo histórico ----------
 let MODEL = null;
@@ -117,6 +227,43 @@ function refreshForecasts() {
   for (const [k, r] of Object.entries(results)) r.fc = fc[k] || null;
 }
 
+// ---------- Pontuação adaptativa ----------
+// ADAPT_VAL: validação walk-forward (qual variante, se bate a original). ADAPT: pesos ajustados hoje.
+let ADAPT = null, ADAPT_VAL = null, PREP = { key: '', P: null };
+try { ADAPT_VAL = JSON.parse(localStorage.getItem('acc_adapt')); } catch (e) {}
+if (ADAPT_VAL && ADAPT_VAL.build !== window.Adaptive.BUILD) ADAPT_VAL = null;
+const VALID_MAX_AGE = 5; // sessões: re-valida quando a validação guardada fica mais antiga do que isto
+const adaptMode = () => S.settings.adaptMode || 'auto';
+const adaptiveOn = () => !!ADAPT && (adaptMode() === 'on' || (adaptMode() === 'auto' && !!ADAPT_VAL && ADAPT_VAL.ok && ADAPT_VAL.active));
+const modelUniverse = () => [...new Set([...S.portfolio.map(p => p.sym), ...watchSyms(), ...extraSyms()])];
+async function loadHistory(universe) {
+  const hist = {};
+  for (const s of universe) { try { const d = await tdSeries(s, KEEP, { offline: true }); if (d.complete.length) hist[s] = d.complete; } catch (e) {} }
+  return hist;
+}
+function setValidation(v) { ADAPT_VAL = v; try { localStorage.setItem('acc_adapt', JSON.stringify(v)); } catch (e) {} }
+// Todos os dias: junta ao treino as linhas cujo resultado a 20 dias ficou conhecido e volta a ajustar os pesos.
+async function refreshAdaptive(opts = {}) {
+  const hist = await loadHistory(modelUniverse());
+  const key = Object.entries(hist).map(([s, b]) => s + ':' + b.length + ':' + b[b.length - 1].datetime).sort().join('|');
+  if (opts.force || key !== PREP.key) PREP = { key, P: Object.keys(hist).length >= 5 ? window.Adaptive.prepare(hist) : null };
+  const P = PREP.P;
+  if (P && (opts.validate || !ADAPT_VAL || !ADAPT_VAL.ok || P.dates.indexOf(ADAPT_VAL.date) < P.dates.length - 1 - VALID_MAX_AGE)) {
+    const prog = opts.onProgress || status;
+    prog('A validar a pontuação adaptativa…');
+    await new Promise(r => setTimeout(r, 30));
+    setValidation(window.Adaptive.validate(P, { buy: S.settings.buyThreshold, sell: S.settings.sellThreshold, onProgress: prog }));
+  }
+  ADAPT = P ? window.Adaptive.fitNow(P, ADAPT_VAL && ADAPT_VAL.ok ? ADAPT_VAL.best : 'comum') : null;
+  applyAdaptive();
+}
+function applyAdaptive() {
+  for (const [sym, r] of Object.entries(results)) {
+    r.as = ADAPT ? window.Adaptive.scoreVec(ADAPT, sym, r.sc0.vec, r.sc0.news) : null;
+    r.sc = adaptiveOn() && r.as ? { ...r.sc0, score: r.as.score, adaptive: true } : r.sc0;
+  }
+}
+
 // ---------- Análise ----------
 async function analyse(raw) {
   const d = await tdSeries(raw);
@@ -127,12 +274,14 @@ async function analyse(raw) {
   const sc = E.scoreIndicators(ind, ns.score);
   const fx = await fxRate(d.meta.currency);
   const bs = MODEL ? window.Model.bucketStats(MODEL, sc.score) : null;
-  return { ind, sc, meta: d.meta, news: nw, ns, fx, fc: null, bs };
+  const r = { ind, sc0: sc, sc, meta: d.meta, news: nw, ns, fx, fc: null, bs, partial: d.partial, stale: d.stale };
+  if (ADAPT) { r.as = window.Adaptive.scoreVec(ADAPT, raw, sc.vec, sc.news); if (adaptiveOn()) r.sc = { ...sc, score: r.as.score, adaptive: true }; }
+  return r;
 }
 function modelOverlay(sym, r) {
   const d = r.dec; if (!d || !MODEL) return;
   const pct = v => (v >= 0 ? '+' : '') + fmt(v * 100, 1) + '%';
-  if (r.bs && r.bs.n >= 30) d.reasons.push(`Histórico (3 anos, ${MODEL.universe.length} ações): com pontuação ${r.bs.range}, o retorno médio a 20 dias foi ${pct(r.bs.mean)} e subiu em ${fmt(r.bs.up * 100, 0)}% dos casos (n=${r.bs.n}).`);
+  if (r.bs && r.bs.n >= 30) d.reasons.push(`Histórico (3 anos, ${MODEL.universe.length} ações): com pontuação original ${r.bs.range}, o retorno médio a 20 dias foi ${pct(r.bs.mean)} e subiu em ${fmt(r.bs.up * 100, 0)}% dos casos (n=${r.bs.n}).`);
   if (!r.fc) return;
   const h = r.fc.hist;
   d.reasons.push(`Modelo 20d: quintil ${r.fc.quintile}/5 entre ${r.fc.peers} ações${modelUsable() ? '' : ` (veredicto ${MODEL.verdict}: só indicativo, não altera a decisão)`}. No walk-forward, este quintil rendeu ${pct(h.r)} (${pct(h.ex)} vs universo) e subiu em ${fmt(h.up * 100, 0)}% dos casos.`);
@@ -172,12 +321,20 @@ async function runList(syms, btn) {
   }
   await refreshRegime();
   refreshForecasts();
+  try { await refreshAdaptive(); } catch (e) { console.error(e); }
   btn.disabled = false;
-  status(errs.length ? `${errs.length} erro(s)` : 'Atualizado ' + new Date().toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' }));
+  const stale = syms.filter(s => results[s] && results[s].stale);
+  status(errs.length ? `${errs.length} erro(s)` : `Atualizado ${new Date().toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' })} · ${NET.calls} pedido(s) à API${stale.length ? ` · ${stale.length} com dados guardados (sem rede)` : ''}`);
+  NET.calls = 0;
   if (errs.length) alert(errs.join('\n'));
 }
 
 // ---------- Render ----------
+function scoreInfo(r) {
+  if (r.sc.adaptive) return `Pontuação <b>${r.sc.score}</b> <span title="pesos ajustados ao histórico">adaptativa</span> (original ${r.sc0.score})`;
+  return `Pontuação ${r.sc.score}${r.as ? ` <span class="mut">(adaptativa ${r.as.score}, não usada)</span>` : ''}`;
+}
+const sgn = v => (v > 0 ? '+' : '') + v;
 function scoreBar(s) {
   const w = Math.abs(s) / 2, col = s >= 0 ? 'var(--buy)' : 'var(--sell)';
   return `<div class="bar"><i style="${s >= 0 ? 'left:50%' : `left:${50 - w}%`};width:${w}%;background:${col}"></i></div>`;
@@ -213,13 +370,16 @@ function indTable(r) {
   </table>`;
 }
 function detailBlock(sym, r) {
-  const comps = r.sc.components.map(c => `<li>${c.pts > 0 ? '+' : ''}${c.pts} · ${esc(c.txt)}</li>`).join('');
+  const comps = r.sc0.components.map(c => {
+    const adj = r.as && c.a >= 0 ? Math.round(c.pts * r.as.mult[c.a]) : null;
+    return `<li>${sgn(c.pts)}${adj != null && adj !== c.pts ? ` → <b>${sgn(adj)}</b>` : ''} · ${esc(c.txt)}</li>`;
+  }).join('') + (r.as ? `<li class="mut">Ajuste de base da pontuação adaptativa ${sgn(Math.round(r.as.base))}${r.as.perStock ? ' · pesos próprios desta ação' : ' · pesos comuns'}</li>` : '');
   const hl = r.news.length ? r.news.slice(0, 6).map(n => `<div class="hl">• <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.headline)}</a> <span class="mut">${esc(n.source)}</span></div>`).join('')
     : `<div class="mut">${sym.includes(':') ? 'Notícias automáticas só para ações EUA (Finnhub).' : S.settings.fhKey ? 'Sem notícias nos últimos 7 dias.' : 'Adiciona a chave Finnhub para ver notícias.'}</div>`;
   return `<details><summary>Indicadores, gráfico e notícias</summary>
     <canvas data-sym="${esc(sym)}"></canvas>
     <div class="legend"><b style="background:#e6edf3"></b>Preço<b style="background:#4ea1ff"></b>EMA13<b style="background:#f5b642"></b>EMA50<b style="background:#c678dd"></b>EMA200<b style="background:#39485a;height:8px"></b>Bollinger</div>
-    ${indTable(r)}<div class="mut" style="margin-top:8px">Componentes da pontuação</div><ul class="r">${comps}</ul>
+    ${indTable(r)}<div class="mut" style="margin-top:8px">Componentes da pontuação${r.as ? ' (original → adaptativa)' : ''}</div><ul class="r">${comps}</ul>
     <div class="mut">Notícias (sentimento ${r.ns.score > 0 ? '+' : ''}${r.ns.score})</div>${hl}</details>`;
 }
 function regimeLine() {
@@ -247,7 +407,7 @@ function renderPortfolio() {
       <div class="row"><span class="tick">${esc(p.sym)}</span><span class="mut">${esc(r.meta.exchange || '')}</span><span class="sp"></span>${actionLabel(d)}<button class="x" data-edit="${idx}">✎</button><button class="x" data-del="${idx}">✕</button></div>
       <div class="row"><span class="big">${c}${fmt(i.close)}</span><span class="${i.changePct >= 0 ? 'pos' : 'neg'}">${i.changePct >= 0 ? '+' : ''}${fmt(i.changePct)}%</span><span class="sp"></span>
         <span class="mut">${fmt(p.qty, 0)} × ${c}${fmt(p.avg)} · <span class="${d.plPct >= 0 ? 'pos' : 'neg'}">${d.plPct >= 0 ? '+' : ''}${fmt(d.plPct, 1)}%</span></span></div>
-      ${scoreBar(r.sc.score)}<div class="mut">Pontuação ${r.sc.score}${r.fc ? ` · modelo Q${r.fc.quintile}/5` : ''}</div>
+      ${scoreBar(r.sc.score)}<div class="mut">${scoreInfo(r)}${r.fc ? ` · modelo Q${r.fc.quintile}/5` : ''}</div>
       ${stopLine(r, p)}
       ${entryLine(r)}
       <ul class="r">${d.reasons.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
@@ -273,7 +433,7 @@ function renderTop() {
     return `<div class="card ${n ? 'pick' : ''}">
       <div class="row">${n ? `<span class="rank">#${n}</span>` : ''}<span class="tick">${esc(x.sym)}</span><span class="mut">${esc(r.meta.exchange || '')}</span><span class="sp"></span>${actionLabel(r.dec)}</div>
       <div class="row"><span class="big">${c}${fmt(i.close)}</span><span class="${i.changePct >= 0 ? 'pos' : 'neg'}">${i.changePct >= 0 ? '+' : ''}${fmt(i.changePct)}%</span><span class="sp"></span><span class="mut">Alvo técnico ${c}${fmt(r.dec.target)} (<b class="pos">+${fmt(r.dec.upsidePct, 1)}%</b>)</span></div>
-      ${scoreBar(r.sc.score)}<div class="mut">Pontuação ${r.sc.score} · ${trend} · RSI ${fmt(i.rsi, 0)} (${mom}) · notícias ${r.ns.score > 0 ? '+' : ''}${r.ns.score}${r.fc ? ` · <b>modelo Q${r.fc.quintile}/5</b>` : ''}</div>
+      ${scoreBar(r.sc.score)}<div class="mut">${scoreInfo(r)} · ${trend} · RSI ${fmt(i.rsi, 0)} (${mom}) · notícias ${r.ns.score > 0 ? '+' : ''}${r.ns.score}${r.fc ? ` · <b>modelo Q${r.fc.quintile}/5</b>` : ''}</div>
       ${n ? entryLine(r) : ''}
       ${n ? `<ul class="r">${r.dec.reasons.map(x => `<li><b>${esc(x)}</b></li>`).join('')}${r.sc.components.filter(c => c.pts > 0).sort((a, b) => b.pts - a.pts).slice(0, 4).map(c => `<li>${esc(c.txt)}</li>`).join('')}</ul>` : ''}
       ${detailBlock(x.sym, r)}</div>`;
@@ -308,7 +468,7 @@ function drawCharts() {
 // ---------- Pedido para o Claude ----------
 function indLine(sym, r) {
   const i = r.ind;
-  return `${sym} (${r.meta.exchange || ''}, ${r.meta.currency}) fecho ${i.date}: ${fmt(i.close)} (${fmt(i.changePct)}%) | EMA13 ${fmt(i.ema13)} EMA50 ${fmt(i.ema50)} EMA100 ${fmt(i.ema100)} EMA200 ${fmt(i.ema200)} | BB20 ${fmt(i.bbLower)}–${fmt(i.bbUpper)} %B ${fmt(i.pctB)} | RSI ${fmt(i.rsi, 1)} | MACD hist ${fmt(i.macdHist, 3)} | ATR ${fmt(i.atr)} | vol/média ${fmt(i.volAvg20 ? i.volume / i.volAvg20 : null)}× | máx52s ${fmt(i.hi52)} | pontuação regras ${r.sc.score}`
+  return `${sym} (${r.meta.exchange || ''}, ${r.meta.currency}) fecho ${i.date}: ${fmt(i.close)} (${fmt(i.changePct)}%) | EMA13 ${fmt(i.ema13)} EMA50 ${fmt(i.ema50)} EMA100 ${fmt(i.ema100)} EMA200 ${fmt(i.ema200)} | BB20 ${fmt(i.bbLower)}–${fmt(i.bbUpper)} %B ${fmt(i.pctB)} | RSI ${fmt(i.rsi, 1)} | MACD hist ${fmt(i.macdHist, 3)} | ATR ${fmt(i.atr)} | vol/média ${fmt(i.volAvg20 ? i.volume / i.volAvg20 : null)}× | máx52s ${fmt(i.hi52)} | pontuação regras ${r.sc0.score}${r.as ? ` | pontuação adaptativa ${r.as.score}${r.sc.adaptive ? ' (usada nas decisões)' : ' (não usada)'}` : ''}${r.partial ? ' | fecho ainda provisório (sessão a decorrer)' : ''}`
     + (r.fc ? ` | modelo 20d quintil ${r.fc.quintile}/5 entre ${r.fc.peers} (walk-forward: ${fmt(r.fc.hist.r * 100, 1)}%, sobe ${fmt(r.fc.hist.up * 100, 0)}%; fatores: ${r.fc.contrib.map(c => c.name + (c.c > 0 ? ' +' : ' −')).join(', ')})` : '')
     + (r.dec && r.dec.posStop ? ` | stop posição ${fmt(r.dec.posStop.level)} (${r.dec.posStop.kind}, a ${fmt(r.dec.posStop.distPct, 1)}%)` : '')
     + (r.dec && r.dec.entry ? ` | entrada sugerida ${fmt(r.dec.entry.low)}–${fmt(r.dec.entry.high)} (${r.dec.entry.now ? 'já' : 'aguardar recuo'}), stop ${fmt(r.dec.entry.stop)}, alvo ${fmt(r.dec.target)}` : '')
@@ -317,6 +477,7 @@ function indLine(sym, r) {
 function contextLines() {
   const L = [];
   if (REGIME) L.push(`Regime de mercado: ${BENCH} ${fmt(REGIME.close)} vs EMA200 ${fmt(REGIME.ema200)} → ${REGIME.riskOff ? 'RISK-OFF (a app suspende compras novas)' : 'risk-on'}.`);
+  if (ADAPT_VAL && ADAPT_VAL.ok) L.push(`Pontuação adaptativa (pesos das regras reajustados diariamente com 3 anos de histórico): ${adaptiveOn() ? 'USADA nas decisões' : 'não usada'} — ${ADAPT_VAL.reason}`);
   if (MODEL) L.push(`Modelo da app: veredicto ${MODEL.verdict} (walk-forward ${MODEL.period.periods} períodos de 20 dias, IC ${fmt(MODEL.oos.model.ic, 3)}, t ${fmt(MODEL.oos.model.t, 1)} / Newey-West ${fmt(MODEL.oos.model.tNW, 1)}). ${modelUsable() ? 'Usado como filtro.' : 'Sem poder preditivo comprovado: não usar os quintis como sinal.'}`);
   return L.join('\n');
 }
@@ -355,17 +516,17 @@ function setPrompt(title, text) {
 const P = v => v == null || isNaN(v) ? '—' : (v >= 0 ? '+' : '') + fmt(v * 100, 1) + '%';
 const extraSyms = () => [...new Set(String(S.settings.modelExtra || '').split(/[,\s;]+/).map(x => x.trim().toUpperCase()).filter(Boolean))];
 async function trainModel(btn) {
-  const universe = [...new Set([...S.portfolio.map(p => p.sym), ...watchSyms(), ...extraSyms()])];
+  const universe = modelUniverse();
   if (universe.length < 5) return alert('São precisas pelo menos 5 ações (carteira + watchlist + universo extra).');
   btn.disabled = true;
   const prog = t => { $('#mProg').textContent = t; status(t); };
   const data = {}, errs = [];
   let bench = null;
   prog(`A descarregar ${BENCH} (referência de mercado)…`);
-  try { bench = (await tdSeries(BENCH, 1000)).bars; } catch (e) { errs.push(`${BENCH}: ${e.message}`); }
+  try { bench = (await tdSeries(BENCH, FULL)).complete.slice(-FULL); } catch (e) { errs.push(`${BENCH}: ${e.message}`); }
   for (let k = 0; k < universe.length; k++) {
     prog(`A descarregar histórico ${universe[k]} (${k + 1}/${universe.length})…`);
-    try { data[universe[k]] = (await tdSeries(universe[k], 1000)).bars; } catch (e) { errs.push(`${universe[k]}: ${e.message}`); if (/chave/i.test(e.message)) break; }
+    try { data[universe[k]] = (await tdSeries(universe[k], FULL)).complete.slice(-FULL); } catch (e) { errs.push(`${universe[k]}: ${e.message}`); if (/chave/i.test(e.message)) break; }
   }
   await new Promise(r => setTimeout(r, 50));
   try {
@@ -380,18 +541,50 @@ async function trainModel(btn) {
     m.regime = bench ? window.Model.regimeNow(bench) : null;
     MODEL = m; REGIME = m.regime || REGIME;
     try { localStorage.setItem('acc_model', JSON.stringify(m)); } catch (e) {}
-    for (const s of Object.keys(results)) results[s].bs = window.Model.bucketStats(MODEL, results[s].sc.score);
+    for (const s of Object.keys(results)) results[s].bs = window.Model.bucketStats(MODEL, results[s].sc0.score);
     refreshForecasts();
+    await refreshAdaptive({ force: true, validate: true, onProgress: prog });
     decideAll(Object.keys(results)); renderPortfolio(); renderTop();
-    prog(`Modelo treinado com ${m.universe.length} ações · veredicto ${m.verdict}${errs.length ? ` · ${errs.length} erro(s)` : ''}.`);
+    prog(`Modelo treinado com ${m.universe.length} ações · veredicto ${m.verdict} · pontuação adaptativa ${adaptiveOn() ? 'ativa' : 'não ativa'}${errs.length ? ` · ${errs.length} erro(s)` : ''}.`);
   } catch (e) { prog('Erro: ' + e.message); }
   if (errs.length) alert(errs.join('\n'));
   btn.disabled = false;
   renderModel();
 }
+function adaptiveCard() {
+  const v = ADAPT_VAL, a = ADAPT, on = adaptiveOn(), mode = adaptMode();
+  const expl = `<div class="note">Todos os dias, ao atualizar os preços, a app junta ao treino os dias cujo resultado a 20 sessões ficou conhecido com o fecho mais recente e volta a calcular os pesos (janela de 3 anos, histórico guardado no telemóvel). Os indicadores de hoje entram na pontuação de hoje; o resultado de hoje só se conhece daqui a 20 sessões. Os pesos partem dos pontos originais e só se afastam deles quando o histórico o justifica. Os pesos por ação partem dos comuns: cada ação tem só ~37 períodos independentes de 20 dias em 3 anos, por isso afastam-se pouco sem evidência forte. A comparação com a pontuação original repete-se sozinha a cada ${VALID_MAX_AGE} sessões.</div>`;
+  if (!v || !v.ok) return `<div class="card"><b>Pontuação adaptativa</b><p class="mut">${v && !v.ok ? esc(v.reason) + ' ' : 'Ainda não validada. '}Analisa a carteira ou treina o modelo: a validação corre com o histórico guardado.</p>${expl}</div>`;
+  const stTxt = on ? (mode === 'on' && !v.active ? 'FORÇADA nas Definições (sem validação)' : 'ATIVA — usada nas decisões')
+    : mode === 'off' ? 'DESLIGADA nas Definições' : 'NÃO ATIVA — as decisões usam a pontuação original';
+  const cls = on ? (v.active ? 'v-moderado' : 'v-fraco') : 'v-nulo';
+  const pc = x => (x == null ? '—' : P(x));
+  const row = (name, o, best, hand) => `<tr${best ? ' style="font-weight:600"' : ''}><td>${esc(name)}${best ? ' ★' : ''}</td><td class="n">${fmt(o.ic, 3)}</td><td class="n">${hand ? fmt(o.t, 1) : fmt(o.dT, 1)}</td><td class="n">${pc(o.buy.ex)} <span class="mut">${o.buy.n}</span></td><td class="n">${pc(o.sell.ex)} <span class="mut">${o.sell.n}</span></td></tr>`;
+  const d = v.icSeries.best.map((x, i) => x - v.icSeries.hand[i]), mx = Math.max(0.05, ...d.map(Math.abs));
+  const bars = d.map((x, i) => `<i title="${esc(v.icSeries.dates[i])}: ${fmt(x, 3)}" style="height:${Math.round(Math.abs(x) / mx * 28) + 1}px;background:${x >= 0 ? 'var(--buy)' : 'var(--sell)'};align-self:${x >= 0 ? 'flex-end' : 'flex-start'}"></i>`).join('');
+  let wt = '';
+  if (a) {
+    const AT = E.ATOMS;
+    wt = `<div class="mut" style="margin-top:10px">Pesos de hoje (${esc(a.asOf)}, ${a.universe} ações, ${esc(a.cfgName)})</div>
+    <table><tr><th>Regra</th><th>Pontos originais</th><th>Hoje</th></tr>${AT.map((at, j) => { const m = a.k * a.beta[j], nv = m * at.max;
+      return `<tr><td>${esc(at.name)}</td><td class="n">${at.max}</td><td class="n ${m < 0 ? 'neg' : Math.abs(m - 1) > 0.25 ? 'pos' : ''}">${fmt(nv, 1)}</td></tr>`; }).join('')}</table>
+    <div class="note">Vermelho = regra invertida (o histórico mostra o efeito contrário ao original). Verde = peso mudou mais de 25%.</div>`;
+    const own = S.portfolio.map(p => p.sym).filter(sy => a.betaSym && a.betaSym[sy]);
+    if (own.length) wt += `<div class="mut" style="margin-top:10px">Maiores diferenças por ação (carteira) face aos pesos comuns</div><table>${own.map(sy => {
+      const dd = AT.map((at, j) => ({ n: at.name, m: a.k * a.betaSym[sy][j], p: a.k * a.beta[j] })).sort((x, y) => Math.abs(y.m - y.p) - Math.abs(x.m - x.p)).slice(0, 2);
+      return `<tr><td><b>${esc(sy)}</b></td><td class="n mut">${dd.map(x => `${esc(x.n)} ×${fmt(x.m, 2)} (comum ×${fmt(x.p, 2)})`).join('<br>')}</td></tr>`; }).join('')}</table>`;
+  }
+  return `<div class="card"><b>Pontuação adaptativa</b><div class="verdict ${cls}" style="font-size:16px;margin-top:4px">${stTxt}</div>
+    <p class="mut">${esc(v.reason)}</p>
+    <div class="tw"><table><tr><th>Walk-forward (${esc(v.from)} → ${esc(v.to)}, ${v.tests} testes, ${v.universe} ações)</th><th>IC</th><th>t (Δ vs orig.)</th><th>Excesso 20d, pont. ≥ ${S.settings.buyThreshold}</th><th>pont. ≤ ${S.settings.sellThreshold}</th></tr>
+    ${row('Original (pontos fixos)', v.hand, false, true)}${v.configs.map(c => row(c.name, c, c.id === v.best, false)).join('')}</table></div>
+    <div class="note">IC = quanto a pontuação ordenou bem as ações pelo retorno seguinte a 20 dias (fora da amostra). A ativação automática exige que a melhor variante bata a original com t ≥ 2. Nas duas últimas colunas: retorno médio face às outras ações quando a pontuação estava acima do limiar de compra ou abaixo do de venda (queres a primeira positiva e a segunda negativa).</div>
+    <div class="mut" style="margin-top:10px">Diferença de IC da melhor variante face à original, em cada teste</div><div class="icb">${bars}</div>
+    ${wt}${expl}</div>`;
+}
 function renderModel() {
   const m = MODEL, el = $('#mReport');
-  if (!m) { el.innerHTML = `<div class="card mut">${MODEL_OLD ? 'O modelo guardado era da versão anterior e foi descartado. ' : ''}Ainda sem modelo. Carrega em "Treinar". Com 40+ ações demora ~6 min por causa do limite grátis de 8 pedidos/min (uma vez por semana chega).</div>`; return; }
+  if (!m) { el.innerHTML = adaptiveCard() + `<div class="card mut">${MODEL_OLD ? 'O modelo guardado era da versão anterior e foi descartado. ' : ''}Ainda sem modelo. Carrega em "Treinar". Com 40+ ações demora ~6 min por causa do limite grátis de 8 pedidos/min (uma vez por semana chega).</div>`; return; }
   const o = m.oos, bt = m.backtest, vtxt = { moderado: 'Poder preditivo MODERADO', fraco: 'Sinal FRACO (só informativo)', nulo: 'Sem poder preditivo comprovado' }[m.verdict];
   const vexp = { moderado: 'Em vários períodos independentes, o modelo ordenou as ações melhor do que o acaso, com significância e quintis ordenados. A app usa-o para travar compras em Q1–Q2 e ordenar o Top 5.',
     fraco: 'Há algum sinal, mas não chega ao critério (IC > 0,03, t ≥ 2 em ≥ 12 períodos, quintis ordenados). A app mostra-o, mas as decisões ficam com as regras e os stops.',
@@ -403,7 +596,7 @@ function renderModel() {
   const maxIc = Math.max(0.05, ...m.periods.map(p => Math.abs(p.ic)));
   const icBars = m.periods.map(p => `<i title="${esc(p.date)}: ${fmt(p.ic, 3)}${p.riskOff ? ' (risk-off)' : ''}" style="height:${Math.round(Math.abs(p.ic) / maxIc * 28) + 1}px;background:${p.ic >= 0 ? 'var(--buy)' : 'var(--sell)'};align-self:${p.ic >= 0 ? 'flex-end' : 'flex-start'};opacity:${p.riskOff ? 0.45 : 1}"></i>`).join('');
   const reg = m.byRegime, bRow = (lbl, x) => x ? `<tr><td>${lbl}</td><td class="n">${P(x.ret)}</td><td class="n">${fmt(x.sharpe, 2)}</td><td class="n">${P(x.mdd)}</td></tr>` : '';
-  el.innerHTML = `
+  el.innerHTML = adaptiveCard() + `
   <div class="card"><div class="verdict v-${m.verdict}">${vtxt}</div><p class="mut">${vexp}</p>
     <table>
       <tr><th>Walk-forward fora da amostra (${esc(m.period.wfFrom)} → ${esc(m.period.wfTo)}, ${m.period.periods} períodos de 20 dias)</th><th>Modelo</th><th>Regras</th></tr>
@@ -479,6 +672,7 @@ function showTab(t) {
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x.id === 't-' + t));
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
   window.scrollTo(0, 0); drawCharts();
+  if (t === 'def') showCacheInfo();
 }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => showTab(b.dataset.t));
 
@@ -522,13 +716,22 @@ $('#cShare').onclick = async () => {
 };
 $('#cOpen').onclick = async () => { try { await navigator.clipboard.writeText(lastPrompt.text); } catch (e) {} window.open('https://claude.ai/new', '_blank'); status('Pedido copiado: cola-o no Claude'); };
 
-const F = { sTd: 'tdKey', sFh: 'fhKey', sCash: 'cash', sRisk: 'riskPct', sMax: 'maxPosPct', sLoss: 'maxLossPct', sTrail: 'trailPct', sBuy: 'buyThreshold', sSell: 'sellThreshold', sTp: 'takeProfitPct', sExtra: 'modelExtra' };
+const F = { sTd: 'tdKey', sFh: 'fhKey', sCash: 'cash', sRisk: 'riskPct', sMax: 'maxPosPct', sLoss: 'maxLossPct', sTrail: 'trailPct', sBuy: 'buyThreshold', sSell: 'sellThreshold', sTp: 'takeProfitPct', sExtra: 'modelExtra', sAdapt: 'adaptMode' };
 Object.entries(F).forEach(([id, k]) => $('#' + id).value = S.settings[k]);
 $('#sSave').onclick = () => {
-  Object.entries(F).forEach(([id, k]) => { const v = $('#' + id).value.trim(); S.settings[k] = /Key$|Extra$/.test(k) ? v : parseFloat(v) || 0; });
-  save(); decideAll(Object.keys(results)); renderPortfolio(); renderTop(); status('Definições guardadas');
+  Object.entries(F).forEach(([id, k]) => { const v = $('#' + id).value.trim(); S.settings[k] = /Key$|Extra$|Mode$/.test(k) ? v : parseFloat(v) || 0; });
+  save(); applyAdaptive(); decideAll(Object.keys(results)); renderPortfolio(); renderTop(); renderModel(); status('Definições guardadas');
 };
-$('#sClear').onclick = () => { clearCache(); status('Cache limpa'); };
+$('#sClear').onclick = async () => {
+  if (!confirm('Apagar o histórico guardado? A app volta a descarregar ~4 anos por ação (1 crédito Twelve Data cada).')) return;
+  await clearCache(); status('Histórico apagado'); showCacheInfo();
+};
+async function showCacheInfo() {
+  try {
+    const c = await cacheInfo();
+    $('#cacheInfo').innerHTML = c.n ? `Histórico guardado no telemóvel: <b>${c.n}</b> ações, ${fmt(c.bars, 0)} sessões (${esc(c.oldest)} → ${esc(c.newest)}). Última atualização: ${new Date(c.lastFetch).toLocaleString('pt-PT', { dateStyle: 'short', timeStyle: 'short' })}. Só as sessões novas são descarregadas.` : 'Ainda sem histórico guardado.';
+  } catch (e) { $('#cacheInfo').textContent = ''; }
+}
 $('#sExport').onclick = async () => {
   const txt = JSON.stringify({ portfolio: S.portfolio, watchlist: S.watchlist, settings: { ...S.settings, tdKey: '', fhKey: '' } });
   try { await navigator.clipboard.writeText(txt); alert('Dados copiados (sem as chaves API). Guarda-os numa nota.'); } catch (e) { prompt('Copia:', txt); }
@@ -543,6 +746,8 @@ $('#mTrain').onclick = e => trainModel(e.target);
 $('#mClaude').onclick = () => MODEL ? setPrompt('Modelo + carteira + Top 5', promptModel()) : alert('Treina o modelo primeiro.');
 renderModel();
 renderPortfolio();
+// pesos adaptativos a partir do histórico guardado (sem pedidos à API)
+MIGRATED.then(() => refreshAdaptive()).then(() => { renderModel(); status(''); }).catch(e => console.error(e));
 if (MODEL_OLD) status('Modelo antigo apagado: treina de novo no separador 🧪');
 if (!S.settings.tdKey) { showTab('def'); status('Configura a chave API'); }
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

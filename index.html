@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pt-PT">
+<html lang="pt-PT" data-build="5.1">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -71,12 +71,14 @@ th:not(:first-child),td.n{text-align:right}
 .tw{overflow-x:auto;margin:0 -4px}.tw table{min-width:520px}
 .icb{display:flex;align-items:center;gap:2px;height:60px;margin:6px 0;border-top:1px dashed var(--line);border-bottom:1px dashed var(--line);background:linear-gradient(var(--line),var(--line)) center/100% 1px no-repeat}
 .icb i{flex:1;min-width:3px;border-radius:1px}
+.ver{font-size:11px;font-weight:600;color:var(--mut);border:1px solid var(--line);border-radius:6px;padding:1px 6px;vertical-align:middle}
+.ver.bad{color:#fff;background:var(--sell);border-color:var(--sell)}
 .legend{font-size:11px;color:var(--mut)}
 .legend b{display:inline-block;width:10px;height:3px;vertical-align:middle;margin:0 3px 0 8px}
 </style>
 </head>
 <body>
-<header><h1>📈 Carteira Acções</h1><div id="status"></div></header>
+<header><h1>📈 Carteira Acções <span id="ver" class="ver"></span></h1><div id="status"></div></header>
 <main>
   <!-- CARTEIRA -->
   <section class="tab on" id="t-carteira">
@@ -150,12 +152,16 @@ th:not(:first-child),td.n{text-align:right}
         <div><label>Limiar de venda (pontuação)</label><input id="sSell" type="number" step="1"></div>
         <div><label>Realizar lucro a partir de (%)</label><input id="sTp" type="number" step="1"></div>
       </div>
+      <label>Pontuação adaptativa (pesos das regras reajustados todos os dias com o histórico)</label>
+      <select id="sAdapt"><option value="auto">Automática — só se prever melhor do que a original (recomendado)</option><option value="on">Sempre — mesmo sem validação</option><option value="off">Desligada — usar os pontos originais</option></select>
       <label>Universo de controlo do modelo (só para treino; ex. ações que não escolheste, incluindo algumas que caíram)</label>
       <textarea id="sExtra" placeholder="INTC, PYPL, NKE, BA, DIS, SNOW, ROKU, U, PATH, LCID"></textarea>
-      <div class="row" style="margin-top:12px"><button class="b" id="sSave">Guardar</button><button class="b2" id="sClear">Limpar cache</button>
+      <div class="row" style="margin-top:12px"><button class="b" id="sSave">Guardar</button><button class="b2" id="sClear">Apagar histórico</button>
         <span class="sp"></span><button class="b2" id="sExport">Exportar dados</button><button class="b2" id="sImport">Importar</button></div>
       <div class="note">
-        <b>Como decide:</b> soma pontos de tendência (EMA13/50/100/200 diárias), momentum (RSI14, MACD 12/26/9), Bollinger (20,2), volume e sentimento de notícias → pontuação −100…+100.
+        <b>Versão:</b> <span id="verInfo"></span><br><br>
+        <span id="cacheInfo"></span><br><br>
+        <b>Como decide:</b> soma pontos de tendência (EMA13/50/100/200 diárias), momentum (RSI14, MACD 12/26/9), Bollinger (20,2), volume e sentimento de notícias → pontuação −100…+100. Com a pontuação adaptativa ativa, o peso de cada regra é reajustado todos os dias com 3 anos de histórico (ver 🧪).
         Compra se ≥ limiar (meia posição se convicção moderada); a quantidade é o mínimo entre: risco % da carteira com stop a 2×ATR14, peso máximo por ação e liquidez.
         Vende tudo se o preço tocar o stop da posição (o mais alto entre o fixo sobre o preço médio e o móvel sobre o máximo desde a entrada), vende o excesso se o peso passar o máximo, vende 1/3 se ≤ limiar de venda e tudo se ≤ 1,7× o limiar; realiza 25% se o ganho passar o limite com RSI&gt;75 acima da banda superior. Não compra quando o QQQ está abaixo da EMA200 (risk-off). Avisa quando uma posição está a menos de 3% do stop. Se uma posição já estava abaixo do stop quando entrou na app, mostra <b>REVER TESE</b> em vez de vender: decide tu e, se mantiveres, define um stop manual.
         <br><br>Ferramenta de apoio à decisão, não é aconselhamento financeiro. Os dados gratuitos podem vir com atraso: confirma os preços no TradingView/broker.
@@ -172,6 +178,7 @@ th:not(:first-child),td.n{text-align:right}
 </nav>
 <script src="engine.js"></script>
 <script src="model.js"></script>
+<script src="adaptive.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
