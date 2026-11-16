@@ -2,6 +2,22 @@
 const $ = s => document.querySelector(s);
 const E = window.Engine;
 const BASE = 'EUR';
+const VERSION = '4.1';
+// Ficheiros de versões diferentes (upload incompleto ou cache) dão erros estranhos: verificar logo ao arrancar
+(function () {
+  const miss = [];
+  if (!E || !E.seriesAll || !E.entryPlan) miss.push('engine.js');
+  if (!window.Model || !window.Model.forecast) miss.push('model.js');
+  if (!window.Risk || !window.Risk.analyse) miss.push('risk.js');
+  if (!document.querySelector('#rReport') || !document.querySelector('#mReport') || !document.querySelector('#ver')) miss.push('index.html');
+  if (miss.length) {
+    document.body.insertAdjacentHTML('afterbegin', `<div style="background:#ff5c5c;color:#fff;padding:14px;font-size:14px;position:relative;z-index:99"><b>Versões misturadas.</b> Estes ficheiros estão em falta ou são antigos: <b>${miss.join(', ')}</b>. Carrega de novo no GitHub todos os ficheiros do zip (versão ${VERSION}), espera 2 minutos e reabre a app.</div>`);
+    throw new Error('Versões misturadas: ' + miss.join(', '));
+  }
+  document.querySelector('#ver').textContent = 'v' + VERSION;
+})();
+// mensagem de erro com o local onde ocorreu, para diagnóstico
+const errTxt = e => { const m = /([\w.-]+\.js)[^:]*:(\d+)/.exec((e && e.stack || '').split('\n').slice(1).join(' ')); return (e && e.message || String(e)) + (m ? ` [${m[1]}:${m[2]}]` : ''); };
 
 // ---------- Estado ----------
 const DEF = {
@@ -65,7 +81,8 @@ async function tdSeries(raw, size = 1000) {
   u.search = new URLSearchParams({ symbol, interval: '1day', outputsize: size, apikey: S.settings.tdKey, ...(mic ? { mic_code: mic } : {}) });
   await throttle();
   const r = await fetch(u); const j = await r.json();
-  if (j.status !== 'ok') throw new Error(j.message || 'Erro Twelve Data');
+  if (j.status !== 'ok' || !Array.isArray(j.values) || !j.values.length) throw new Error(j.message || 'Twelve Data não devolveu cotações para este ticker');
+  if (!j.meta) j.meta = { symbol };
   const bars = j.values.map(v => ({ datetime: v.datetime, open: +v.open, high: +v.high, low: +v.low, close: +v.close, volume: +(v.volume || 0) })).reverse();
   const out = { day: today(), bars, meta: j.meta };
   await IDB.set(key, out);
@@ -157,11 +174,11 @@ async function runList(syms, btn) {
   for (let i = 0; i < syms.length; i++) {
     status(`A analisar ${syms[i]} (${i + 1}/${syms.length})…`);
     try { results[syms[i]] = await analyse(syms[i]); }
-    catch (e) { errs.push(`${syms[i]}: ${e.message}`); if (/chave/i.test(e.message)) break; }
+    catch (e) { errs.push(`${syms[i]}: ${errTxt(e)}`); if (/chave/i.test(e.message)) break; }
   }
   btn.disabled = false;
   status(errs.length ? `${errs.length} erro(s)` : 'Atualizado ' + new Date().toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' }));
-  if (errs.length) alert(errs.join('\n'));
+  if (errs.length) alert(`Versão ${VERSION}\n` + errs.join('\n'));
 }
 
 // ---------- Radar de risco ----------
@@ -186,7 +203,7 @@ async function computeRadar(fetchAll, btn) {
       if (fetchAll) prog(`A descarregar ${s} (${k + 1}/${syms.length})…`);
       const d = fetchAll ? await tdSeries(s, 1000) : await IDB.get('c_' + s + '_1000');
       if (d && d.bars && d.bars.length >= 60) series[s] = E.seriesAll(d.bars);
-    } catch (e) { errs.push(`${s}: ${e.message}`); if (/chave/i.test(e.message)) break; }
+    } catch (e) { errs.push(`${s}: ${errTxt(e)}`); if (/chave/i.test(e.message)) break; }
   }
   if (btn) btn.disabled = false;
   if (Object.keys(series).length >= 3) {
@@ -481,7 +498,7 @@ async function trainModel(btn) {
   const data = {}, errs = [];
   for (let k = 0; k < universe.length; k++) {
     prog(`A descarregar histórico ${universe[k]} (${k + 1}/${universe.length})…`);
-    try { data[universe[k]] = (await tdSeries(universe[k], 1000)).bars; } catch (e) { errs.push(`${universe[k]}: ${e.message}`); if (/chave/i.test(e.message)) break; }
+    try { data[universe[k]] = (await tdSeries(universe[k], 1000)).bars; } catch (e) { errs.push(`${universe[k]}: ${errTxt(e)}`); if (/chave/i.test(e.message)) break; }
   }
   await new Promise(r => setTimeout(r, 50));
   try {
